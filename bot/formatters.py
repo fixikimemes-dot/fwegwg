@@ -79,3 +79,9 @@ def format_plan(tasks: list[dict[str, Any]]) -> str:
         lines.append("")
 
     return "\n".join(lines).strip()
+def format_plan_table(tasks):
+    return format_plan(tasks)
+
+
+def format_tasks_table(tasks):
+    return format_plan(tasks)
