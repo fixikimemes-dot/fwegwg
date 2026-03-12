@@ -1,82 +1,81 @@
 from __future__ import annotations
 
-from collections import Counter
-from typing import Iterable
-
+from html import escape
+from typing import Any
 
 PRIORITY_LABELS = {
-    1: "низкий",
-    2: "средний",
-    3: "высокий",
+    1: "низкая",
+    2: "средняя",
+    3: "высокая",
 }
 
-STATUS_ICON = {
+PRIORITY_EMOJI = {
+    1: "🟢",
+    2: "🟡",
+    3: "🔴",
+}
+
+STATUS_LABELS = {
+    "pending": "в процессе",
+    "done": "выполнено",
+    "skipped": "пропущено",
+}
+
+STATUS_EMOJI = {
     "pending": "⏳",
     "done": "✅",
     "skipped": "⏭️",
 }
 
 
-def shorten(text: str, width: int) -> str:
-    clean = (text or "").replace("\n", " ").strip()
-    if len(clean) <= width:
-        return clean.ljust(width)
-    if width <= 1:
-        return clean[:width]
-    return (clean[: width - 1] + "…")
+def format_hobbies(hobbies: list[str]) -> str:
+    if not hobbies:
+        return "не указаны"
+    return ", ".join(hobbies)
 
 
-def format_plan_table(tasks: list[dict]) -> str:
-    if not tasks:
-        return "<b>На сегодня задач пока нет.</b>\nНажми «➕ Добавить задачу», и я соберу тебе план."
-
-    lines = []
-    header = f"{'#':<2} {'P':<1} {'Задача':<28} {'Мин':>4} {'Статус':<6}"
-    sep = "-" * len(header)
-    lines.append(header)
-    lines.append(sep)
-    for idx, task in enumerate(tasks, start=1):
-        priority = str(task.get("priority", 2))
-        title = shorten(task.get("title", ""), 28)
-        duration = str(task.get("duration_minutes") or "-")
-        status = STATUS_ICON.get(task.get("status", "pending"), "⏳")
-        lines.append(f"{idx:<2} {priority:<1} {title} {duration:>4} {status:<6}")
-
-    return "<b>План на день</b>\n<pre>" + "\n".join(lines) + "</pre>"
+def _shorten(text: str, limit: int = 48) -> str:
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
-def progress_summary(tasks: list[dict]) -> str:
-    if not tasks:
-        return "План на день пока пустой."
+def format_task_card(task: dict[str, Any], index: int | None = None) -> str:
+    title = escape(task.get("title") or "Без названия")
+    title = _shorten(title, 60)
 
-    counter = Counter(task.get("status", "pending") for task in tasks)
-    total = len(tasks)
-    done = counter.get("done", 0)
-    pending = counter.get("pending", 0)
-    skipped = counter.get("skipped", 0)
-    percent = round((done / total) * 100) if total else 0
-    return (
-        f"Всего задач: <b>{total}</b>\n"
-        f"✅ Выполнено: <b>{done}</b>\n"
-        f"⏳ В процессе: <b>{pending}</b>\n"
-        f"⏭️ Отложено: <b>{skipped}</b>\n"
-        f"📈 Прогресс: <b>{percent}%</b>"
-    )
-
-
-def format_task_details(task: dict) -> str:
+    priority = int(task.get("priority", 2) or 2)
+    status = task.get("status", "pending")
     duration = task.get("duration_minutes")
-    duration_text = f"{duration} мин" if duration else "не указано"
-    note = task.get("note") or "—"
+
+    priority_label = PRIORITY_LABELS.get(priority, "средняя")
+    priority_emoji = PRIORITY_EMOJI.get(priority, "🟡")
+    status_label = STATUS_LABELS.get(status, "в процессе")
+    status_emoji = STATUS_EMOJI.get(status, "⏳")
+
+    number = f"{index}. " if index is not None else ""
+    duration_text = f"{duration} мин" if duration else "время не указано"
+
     return (
-        f"<b>{task.get('title')}</b>\n"
-        f"Приоритет: <b>{PRIORITY_LABELS.get(task.get('priority'), 'средний')}</b>\n"
-        f"Длительность: <b>{duration_text}</b>\n"
-        f"Статус: <b>{task.get('status')}</b>\n"
-        f"Комментарий: {note}"
+        f"{status_emoji} <b>{number}{title}</b>\n"
+        f"   {priority_emoji} Серьёзность: <b>{priority_label}</b>\n"
+        f"   ⏱ Время: <b>{duration_text}</b>\n"
+        f"   📌 Статус: <b>{status_label}</b>"
     )
 
 
-def format_hobbies(hobbies: Iterable[str]) -> str:
-    values = [item.strip() for item in hobbies if item and item.strip()]
-    return ", ".join(values) if values else "не указаны"
+def format_plan(tasks: list[dict[str, Any]]) -> str:
+    if not tasks:
+        return (
+            "🗓 <b>План на день</b>\n\n"
+            "У тебя пока нет задач.\n"
+            "Добавь первую задачу через кнопку ниже."
+        )
+
+    lines = ["🗓 <b>План на день</b>\n"]
+    for i, task in enumerate(tasks, start=1):
+        lines.append(format_task_card(task, i))
+        lines.append("")
+
+    return "\n".join(lines).strip()
