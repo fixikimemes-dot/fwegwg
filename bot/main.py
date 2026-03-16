@@ -27,10 +27,19 @@ from telegram.ext import (
 from .ai_service import AIService
 from .config import ConfigError, Settings, load_settings
 from .db import Database
-from .formatters import format_hobbies, format_plan_table, progress_summary
+from .formatters import (
+    format_calorie_day,
+    format_calorie_estimate,
+    format_hobbies,
+    format_plan,
+    progress_summary,
+)
 from .keyboards import (
     BTN_ADD,
     BTN_AI,
+    BTN_CALORIES,
+    BTN_CALORIES_PHOTO,
+    BTN_CALORIES_TODAY,
     BTN_CANCEL,
     BTN_COACH,
     BTN_DONE,
@@ -44,6 +53,8 @@ from .keyboards import (
     SCHEDULE_MIDDAY,
     SCHEDULE_MORNING,
     SCHEDULE_TZ,
+    calorie_confirm_keyboard,
+    calories_menu,
     cancel_menu,
     main_menu,
     priority_menu,
@@ -63,6 +74,7 @@ ONBOARD_BIO, ONBOARD_HOBBIES, ONBOARD_TIMEZONE, ONBOARD_MORNING, ONBOARD_MIDDAY,
 ADD_TITLE, ADD_PRIORITY, ADD_DURATION, ADD_NOTE = range(10, 14)
 COACH_QUESTION = 20
 CHECKIN_SUMMARY = 30
+CALORIE_WAIT_PHOTO = 40
 
 TIME_RE = re.compile(r"^(?:[01]?\d|2[0-3]):[0-5]\d$")
 
@@ -137,6 +149,7 @@ def _remove_jobs(application: Application, name: str) -> None:
 async def schedule_jobs_for_user(application: Application, user: dict[str, Any]) -> None:
     if not user.get("onboarding_complete"):
         return
+
     job_queue = application.job_queue
     if not job_queue:
         return
@@ -164,14 +177,16 @@ async def schedule_jobs_for_user(application: Application, user: dict[str, Any])
 async def post_init(application: Application) -> None:
     db: Database = application.bot_data["db"]
     await db.init()
+
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "запустить или перезапустить бота"),
+            BotCommand("start", "запустить бота"),
             BotCommand("menu", "показать меню"),
             BotCommand("plan", "план на сегодня"),
             BotCommand("analysis", "AI-анализ дня"),
             BotCommand("coach", "задать вопрос AI-коучу"),
             BotCommand("report", "написать промежуточный отчёт"),
+            BotCommand("calories", "калории по фото и за день"),
             BotCommand("export", "экспорт данных за 30 дней"),
             BotCommand("settings", "настройки напоминаний"),
         ]
@@ -194,7 +209,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not user_obj or not update.message:
         return ConversationHandler.END
 
-    user = await db.ensure_user(
+    await db.ensure_user(
         telegram_id=user_obj.id,
         full_name=user_obj.full_name,
         username=user_obj.username,
@@ -206,17 +221,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     context.user_data.pop("settings_target", None)
 
-    if user.get("onboarding_complete"):
+    existing_user = await db.get_user_by_telegram_id(user_obj.id)
+    profile_complete = await db.user_profile_is_complete(user_obj.id)
+
+    if existing_user and profile_complete:
+        text = (
+            f"С возвращением, <b>{existing_user.get('full_name') or 'друг'}</b> 👋\n\n"
+            "Я помню твой профиль и не буду спрашивать анкету заново.\n"
+            f"🎯 Увлечения: <b>{format_hobbies(existing_user.get('hobbies', []))}</b>\n"
+            f"🌍 Часовой пояс: <b>{existing_user.get('timezone', 'не указан')}</b>\n\n"
+            "Выбирай, что сделать дальше:"
+        )
         await update.message.reply_text(
-            "Я уже на месте. Напомню про план, помогу отмечать прогресс и дам AI-разбор дня.",
+            text,
             reply_markup=main_menu(),
+            parse_mode=ParseMode.HTML,
         )
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "Привет. Я соберу тебе умного Telegram-бота для контроля успеваемости за день.\n\n"
-        "Сначала коротко расскажи о себе: чем занимаешься, в каком ты ритме, что сейчас важно. "
-        "Это будет твоя биография для AI-анализа.",
+        "Привет 👋\n\n"
+        "Давай сначала познакомимся, чтобы я мог реально анализировать тебя, "
+        "твои планы и привычки.\n\n"
+        "Коротко расскажи о себе: чем занимаешься, какой у тебя ритм дня, "
+        "что сейчас важно. Это будет твоя биография для AI-анализа.",
         reply_markup=cancel_menu(),
     )
     return ONBOARD_BIO
@@ -334,12 +362,15 @@ async def onboarding_evening(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.pop("midday_time", None)
 
     await update.message.reply_text(
-        "Готово. Теперь я:\n"
+        "Готово ✅\n\n"
+        "Теперь я:\n"
         "• сам пишу тебе утром, днём и вечером;\n"
         "• собираю задачи кнопками;\n"
-        "• показываю план в виде таблицы;\n"
+        "• красиво показываю план на день;\n"
+        "• считаю калории по фото еды;\n"
+        "• веду дневник калорий;\n"
         "• делаю AI-анализ по биографии, интересам и твоим результатам.\n\n"
-        "Начнём с первой задачи?",
+        "Начнём?",
         reply_markup=main_menu(),
     )
     return ConversationHandler.END
@@ -440,11 +471,11 @@ async def add_task_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     tasks = await db.get_tasks_for_day(update.effective_user.id, today_str(user))
     await update.message.reply_text(
-        "Задача добавлена. Вот твоя таблица на сегодня:",
+        "Задача добавлена ✅",
         reply_markup=main_menu(),
     )
     await update.message.reply_text(
-        format_plan_table(tasks),
+        format_plan(tasks) + "\n\n" + progress_summary(tasks),
         parse_mode=ParseMode.HTML,
         reply_markup=task_action_keyboard(tasks),
     )
@@ -460,10 +491,13 @@ async def show_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user:
         if update.message:
             await update.message.reply_text("Сначала нажми /start.")
+        elif update.callback_query and update.callback_query.message:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text("Сначала нажми /start.")
         return
 
     tasks = await db.get_tasks_for_day(user_obj.id, today_str(user))
-    text = format_plan_table(tasks) + "\n\n" + progress_summary(tasks)
+    text = format_plan(tasks) + "\n\n" + progress_summary(tasks)
 
     if update.callback_query and update.callback_query.message:
         await update.callback_query.answer()
@@ -498,7 +532,7 @@ async def mark_done_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=main_menu(),
     )
     await update.message.reply_text(
-        format_plan_table(tasks),
+        format_plan(tasks),
         parse_mode=ParseMode.HTML,
         reply_markup=task_action_keyboard(tasks),
     )
@@ -536,7 +570,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     tasks = await db.get_tasks_for_day(update.effective_user.id, today_str(user))
     await query.message.reply_text(status_text)
     await query.message.reply_text(
-        format_plan_table(tasks) + "\n\n" + progress_summary(tasks),
+        format_plan(tasks) + "\n\n" + progress_summary(tasks),
         parse_mode=ParseMode.HTML,
         reply_markup=task_action_keyboard(tasks) if tasks else None,
     )
@@ -583,6 +617,7 @@ async def coach_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         if context.args:
             context.user_data["coach_direct_question"] = " ".join(context.args)
             return await coach_question(update, context)
+
         await update.message.reply_text(
             "Напиши вопрос AI-коучу. Например: «Как не сорваться с плана после работы?»",
             reply_markup=cancel_menu(),
@@ -594,8 +629,10 @@ async def coach_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def coach_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db, ai, _ = services(context)
     user_obj = update.effective_user
+
     if not user_obj or not update.message:
         return ConversationHandler.END
+
     user = await db.get_user(user_obj.id)
     if not user:
         await update.message.reply_text("Сначала нажми /start.")
@@ -613,6 +650,7 @@ async def coach_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def checkin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     kind = "manual"
+
     if update.callback_query:
         await update.callback_query.answer()
         kind = update.callback_query.data.split(":", 1)[1]
@@ -622,21 +660,25 @@ async def checkin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             reply_markup=cancel_menu(),
         )
         return CHECKIN_SUMMARY
+
     if update.message:
+        context.user_data["checkin_kind"] = kind
         await update.message.reply_text(
             "Напиши коротко, как проходит день: что сделал, где застрял, что мешает.",
             reply_markup=cancel_menu(),
         )
-        context.user_data["checkin_kind"] = kind
         return CHECKIN_SUMMARY
+
     return ConversationHandler.END
 
 
 async def checkin_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db, _, _ = services(context)
     user_obj = update.effective_user
+
     if not user_obj or not update.message:
         return ConversationHandler.END
+
     user = await db.get_user(user_obj.id)
     if not user:
         await update.message.reply_text("Сначала нажми /start.")
@@ -655,6 +697,156 @@ async def checkin_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 
+async def calories_menu_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(
+            "Раздел калорий.\n\n"
+            "• Нажми «📷 Блюдо по фото», чтобы оценить блюдо по фотографии.\n"
+            "• Нажми «🔥 Калории за сегодня», чтобы посмотреть итог за день.",
+            reply_markup=calories_menu(),
+        )
+
+
+async def calories_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db, _, _ = services(context)
+    user_obj = update.effective_user
+    if not user_obj or not update.message:
+        return
+
+    user = await db.get_user(user_obj.id)
+    if not user:
+        await update.message.reply_text("Сначала нажми /start.")
+        return
+
+    entries = await db.get_calorie_entries_for_day(user_obj.id, today_str(user))
+    await update.message.reply_text(
+        format_calorie_day(entries),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu(),
+    )
+
+
+async def calorie_photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        context.user_data.pop("pending_calorie_estimate", None)
+        context.user_data.pop("pending_calorie_file_id", None)
+
+        await update.message.reply_text(
+            "Пришли фото блюда.\n\n"
+            "Лучше, чтобы блюдо было видно целиком.\n"
+            "Можно добавить подпись, например: «паста с курицей» или «бургер без соуса».",
+            reply_markup=cancel_menu(),
+        )
+    return CALORIE_WAIT_PHOTO
+
+
+async def calorie_waiting_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        await update.message.reply_text(
+            "Мне нужно именно фото блюда.\n"
+            "Пришли фотографию, и я примерно посчитаю калории.",
+            reply_markup=cancel_menu(),
+        )
+    return CALORIE_WAIT_PHOTO
+
+
+async def calorie_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db, ai, _ = services(context)
+    user_obj = update.effective_user
+
+    if not user_obj or not update.message or not update.message.photo:
+        return CALORIE_WAIT_PHOTO
+
+    user = await db.get_user(user_obj.id)
+    if not user:
+        await update.message.reply_text("Сначала нажми /start.")
+        return ConversationHandler.END
+
+    photo = update.message.photo[-1]
+    telegram_file = await photo.get_file()
+    photo_bytes = bytes(await telegram_file.download_as_bytearray())
+    caption = update.message.caption or ""
+
+    wait_message = await update.message.reply_text("Смотрю на фото и считаю калории...")
+
+    estimate = await ai.estimate_meal_from_photo(photo_bytes, caption)
+    if not estimate:
+        await wait_message.reply_text(
+            "Не смог нормально оценить блюдо по фото.\n"
+            "Попробуй прислать более понятное фото или добавь подпись с составом.",
+            reply_markup=main_menu(),
+        )
+        return ConversationHandler.END
+
+    context.user_data["pending_calorie_estimate"] = estimate
+    context.user_data["pending_calorie_file_id"] = photo.file_id
+
+    await wait_message.reply_text(
+        format_calorie_estimate(estimate),
+        parse_mode=ParseMode.HTML,
+        reply_markup=calorie_confirm_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def calorie_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not update.effective_user:
+        return
+
+    await query.answer()
+
+    pending = context.user_data.get("pending_calorie_estimate")
+    if not pending:
+        await query.message.reply_text(
+            "Нет оценки для подтверждения.\nСначала пришли фото блюда.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if query.data == "calorie:cancel":
+        context.user_data.pop("pending_calorie_estimate", None)
+        context.user_data.pop("pending_calorie_file_id", None)
+        await query.message.reply_text(
+            "Окей, не добавляю.\nМожешь прислать другое фото позже.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    db, _, _ = services(context)
+    user = await db.get_user(update.effective_user.id)
+    if not user:
+        await query.message.reply_text("Сначала нажми /start.")
+        return
+
+    await db.add_calorie_entry(
+        telegram_id=update.effective_user.id,
+        day=today_str(user),
+        meal_name=pending.get("meal_name", "Блюдо"),
+        calories=int(pending.get("calories") or 0),
+        protein_grams=pending.get("protein_grams"),
+        fat_grams=pending.get("fat_grams"),
+        carbs_grams=pending.get("carbs_grams"),
+        note=pending.get("note"),
+        image_file_id=context.user_data.get("pending_calorie_file_id"),
+    )
+
+    context.user_data.pop("pending_calorie_estimate", None)
+    context.user_data.pop("pending_calorie_file_id", None)
+
+    entries = await db.get_calorie_entries_for_day(update.effective_user.id, today_str(user))
+
+    await query.message.reply_text(
+        "Добавил в дневник калорий ✅",
+        reply_markup=main_menu(),
+    )
+    await query.message.reply_text(
+        format_calorie_day(entries),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu(),
+    )
+
+
 async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
@@ -667,6 +859,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     if not query or not update.effective_user:
         return
+
     await query.answer()
     data = query.data
     context.user_data.pop("settings_target", None)
@@ -675,21 +868,25 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["settings_target"] = "morning_time"
         await query.message.reply_text("Напиши новое утреннее время в формате HH:MM", reply_markup=cancel_menu())
         return
+
     if data == SCHEDULE_MIDDAY:
         context.user_data["settings_target"] = "midday_time"
         await query.message.reply_text("Напиши новое дневное время в формате HH:MM", reply_markup=cancel_menu())
         return
+
     if data == SCHEDULE_EVENING:
         context.user_data["settings_target"] = "evening_time"
         await query.message.reply_text("Напиши новое вечернее время в формате HH:MM", reply_markup=cancel_menu())
         return
+
     if data == SCHEDULE_TZ:
+        context.user_data["settings_target"] = "timezone"
         await query.message.reply_text(
             "Выбери часовой пояс или отправь его вручную строкой вроде Europe/Amsterdam",
             reply_markup=timezone_keyboard(),
         )
-        context.user_data["settings_target"] = "timezone"
         return
+
     if data.startswith("tz:"):
         timezone_name = data.split(":", 1)[1]
         db, _, _ = services(context)
@@ -708,6 +905,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def maybe_handle_settings_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
+
     target = context.user_data.get("settings_target")
     if not target:
         return
@@ -746,6 +944,7 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_obj = update.effective_user
     if not user_obj or not update.message:
         return
+
     user = await db.get_user(user_obj.id)
     if not user:
         await update.message.reply_text("Сначала нажми /start.")
@@ -759,8 +958,14 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"Профиль: {user.get('full_name') or 'без имени'}\n"
         f"Увлечения: {format_hobbies(user.get('hobbies', []))}"
     )
+
     with export_path.open("rb") as file_obj:
-        await update.message.reply_document(document=file_obj, filename=export_path.name, caption=caption)
+        await update.message.reply_document(
+            document=file_obj,
+            filename=export_path.name,
+            caption=caption,
+        )
+
     export_path.unlink(missing_ok=True)
 
 
@@ -774,6 +979,7 @@ def create_export_zip(export_dir: Path, telegram_id: int, dataset: dict[str, lis
             write_csv(csv_path, rows)
             archive.write(csv_path, arcname=csv_path.name)
             csv_path.unlink(missing_ok=True)
+
     return zip_path
 
 
@@ -800,19 +1006,24 @@ async def reminder_action_router(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not query:
         return
+
     data = query.data
     if data == "open:plan":
         await show_plan(update, context)
     elif data == "open:analysis":
         await analysis_today(update, context)
+    elif data == "open:add":
+        await add_task_entry(update, context)
 
 
 async def morning_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     db, _, _ = services(context)
     telegram_id = int(context.job.data["telegram_id"])
+
     user = await db.get_user(telegram_id)
     if not user:
         return
+
     tasks = await db.get_tasks_for_day(telegram_id, today_str(user))
     text = (
         f"Доброе утро. Сейчас у тебя <b>{now_hhmm(user)}</b>.\n"
@@ -820,6 +1031,7 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     if tasks:
         text += "\n\n" + progress_summary(tasks)
+
     await context.bot.send_message(
         chat_id=telegram_id,
         text=text,
@@ -837,15 +1049,18 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def midday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     db, _, _ = services(context)
     telegram_id = int(context.job.data["telegram_id"])
+
     user = await db.get_user(telegram_id)
     if not user:
         return
+
     tasks = await db.get_tasks_for_day(telegram_id, today_str(user))
     text = (
         f"Дневная проверка. Сейчас <b>{now_hhmm(user)}</b>.\n"
         "Посмотри, что уже закрыто, и напиши короткий отчёт.\n\n"
         + progress_summary(tasks)
     )
+
     await context.bot.send_message(
         chat_id=telegram_id,
         text=text,
@@ -863,15 +1078,18 @@ async def midday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def evening_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     db, _, _ = services(context)
     telegram_id = int(context.job.data["telegram_id"])
+
     user = await db.get_user(telegram_id)
     if not user:
         return
+
     tasks = await db.get_tasks_for_day(telegram_id, today_str(user))
     text = (
         f"Вечерний итог. Сейчас <b>{now_hhmm(user)}</b>.\n"
         "Давай подведём день, сохраним отчёт и сделаем AI-разбор.\n\n"
         + progress_summary(tasks)
     )
+
     await context.bot.send_message(
         chat_id=telegram_id,
         text=text,
@@ -886,19 +1104,9 @@ async def evening_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if context.user_data.get("settings_target"):
-        return
-    await update.message.reply_text(
-        "Я понял сообщение, но лучше используй кнопки ниже: так я точнее сохраню план и прогресс.",
-        reply_markup=main_menu(),
-    )
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled error", exc_info=context.error)
+
     if isinstance(update, Update):
         target_message = update.effective_message
         if target_message:
@@ -928,15 +1136,43 @@ def build_application(settings: Settings) -> Application:
     onboarding_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ONBOARD_BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_bio)],
-            ONBOARD_HOBBIES: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_hobbies)],
+            ONBOARD_BIO: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_bio,
+                )
+            ],
+            ONBOARD_HOBBIES: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_hobbies,
+                )
+            ],
             ONBOARD_TIMEZONE: [
                 CallbackQueryHandler(onboarding_timezone_callback, pattern=r"^tz:"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_timezone_text),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_timezone_text,
+                ),
             ],
-            ONBOARD_MORNING: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_morning)],
-            ONBOARD_MIDDAY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_midday)],
-            ONBOARD_EVENING: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), onboarding_evening)],
+            ONBOARD_MORNING: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_morning,
+                )
+            ],
+            ONBOARD_MIDDAY: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_midday,
+                )
+            ],
+            ONBOARD_EVENING: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    onboarding_evening,
+                )
+            ],
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel),
@@ -952,10 +1188,30 @@ def build_application(settings: Settings) -> Application:
             CallbackQueryHandler(add_task_entry, pattern=r"^open:add$"),
         ],
         states={
-            ADD_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), add_task_title)],
-            ADD_PRIORITY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), add_task_priority)],
-            ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), add_task_duration)],
-            ADD_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), add_task_note)],
+            ADD_TITLE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    add_task_title,
+                )
+            ],
+            ADD_PRIORITY: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    add_task_priority,
+                )
+            ],
+            ADD_DURATION: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    add_task_duration,
+                )
+            ],
+            ADD_NOTE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    add_task_note,
+                )
+            ],
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel),
@@ -970,7 +1226,12 @@ def build_application(settings: Settings) -> Application:
             MessageHandler(filters.Regex(f"^{re.escape(BTN_COACH)}$"), coach_entry),
         ],
         states={
-            COACH_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), coach_question)],
+            COACH_QUESTION: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    coach_question,
+                )
+            ],
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel),
@@ -985,7 +1246,32 @@ def build_application(settings: Settings) -> Application:
             CallbackQueryHandler(checkin_entry, pattern=r"^checkin:(midday|evening)$"),
         ],
         states={
-            CHECKIN_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), checkin_summary)],
+            CHECKIN_SUMMARY: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    checkin_summary,
+                )
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel),
+            CommandHandler("cancel", cancel),
+        ],
+        allow_reentry=True,
+    )
+
+    calorie_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(f"^{re.escape(BTN_CALORIES_PHOTO)}$"), calorie_photo_entry),
+        ],
+        states={
+            CALORIE_WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO, calorie_photo_received),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^{re.escape(BTN_CANCEL)}$"),
+                    calorie_waiting_text,
+                ),
+            ],
         },
         fallbacks=[
             MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel),
@@ -998,22 +1284,27 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(add_task_conv)
     application.add_handler(coach_conv)
     application.add_handler(checkin_conv)
+    application.add_handler(calorie_conv)
 
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("plan", show_plan))
     application.add_handler(CommandHandler("analysis", analysis_today))
+    application.add_handler(CommandHandler("calories", calories_menu_entry))
     application.add_handler(CommandHandler("export", export_data))
     application.add_handler(CommandHandler("settings", settings_entry))
 
     application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_PLAN)}$"), show_plan))
     application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_DONE)}$"), mark_done_prompt))
     application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_AI)}$"), analysis_today))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_CALORIES)}$"), calories_menu_entry))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_CALORIES_TODAY)}$"), calories_today))
     application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_EXPORT)}$"), export_data))
     application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_SETTINGS)}$"), settings_entry))
 
     application.add_handler(CallbackQueryHandler(task_callback, pattern=r"^(done|skip|delete):\d+$"))
     application.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^(schedule:|tz:)"))
-    application.add_handler(CallbackQueryHandler(reminder_action_router, pattern=r"^open:(plan|analysis)$"))
+    application.add_handler(CallbackQueryHandler(reminder_action_router, pattern=r"^open:(plan|analysis|add)$"))
+    application.add_handler(CallbackQueryHandler(calorie_confirm_callback, pattern=r"^calorie:(confirm|cancel)$"))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, maybe_handle_settings_value), group=1)
 
@@ -1023,6 +1314,7 @@ def build_application(settings: Settings) -> Application:
 
 def main() -> None:
     load_dotenv()
+
     try:
         settings = load_settings()
     except ConfigError as exc:
