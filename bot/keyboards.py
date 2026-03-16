@@ -8,6 +8,9 @@ BTN_PLAN = "📋 План на сегодня"
 BTN_DONE = "✅ Отметить выполнение"
 BTN_AI = "🧠 AI-анализ"
 BTN_COACH = "💬 AI-коуч"
+BTN_CALORIES = "🍽 Калории"
+BTN_CALORIES_PHOTO = "📷 Блюдо по фото"
+BTN_CALORIES_TODAY = "🔥 Калории за сегодня"
 BTN_EXPORT = "📤 Экспорт"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_CANCEL = "❌ Отмена"
@@ -37,15 +40,19 @@ def main_menu() -> ReplyKeyboardMarkup:
         [
             [KeyboardButton(BTN_ADD), KeyboardButton(BTN_PLAN)],
             [KeyboardButton(BTN_DONE), KeyboardButton(BTN_AI)],
-            [KeyboardButton(BTN_COACH), KeyboardButton(BTN_EXPORT)],
-            [KeyboardButton(BTN_SETTINGS)],
+            [KeyboardButton(BTN_COACH), KeyboardButton(BTN_CALORIES)],
+            [KeyboardButton(BTN_EXPORT), KeyboardButton(BTN_SETTINGS)],
         ],
         resize_keyboard=True,
     )
 
 
 def cancel_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([[KeyboardButton(BTN_CANCEL)]], resize_keyboard=True, one_time_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(BTN_CANCEL)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 
 def priority_menu() -> ReplyKeyboardMarkup:
@@ -64,6 +71,26 @@ def yes_no_menu() -> ReplyKeyboardMarkup:
         [[KeyboardButton("Да"), KeyboardButton("Нет")], [KeyboardButton(BTN_CANCEL)]],
         resize_keyboard=True,
         one_time_keyboard=True,
+    )
+
+
+def calories_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(BTN_CALORIES_PHOTO), KeyboardButton(BTN_CALORIES_TODAY)],
+            [KeyboardButton(BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def calorie_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Добавить в дневник", callback_data="calorie:confirm")],
+            [InlineKeyboardButton("❌ Не добавлять", callback_data="calorie:cancel")],
+        ]
     )
 
 
