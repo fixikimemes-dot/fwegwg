@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from html import escape
-from typing import Any
+from typing import Any, Iterable
+
 
 PRIORITY_LABELS = {
     1: "низкая",
@@ -19,7 +20,7 @@ PRIORITY_EMOJI = {
 STATUS_LABELS = {
     "pending": "в процессе",
     "done": "выполнено",
-    "skipped": "пропущено",
+    "skipped": "отложено",
 }
 
 STATUS_EMOJI = {
@@ -29,22 +30,23 @@ STATUS_EMOJI = {
 }
 
 
-def format_hobbies(hobbies: list[str] | None) -> str:
-    if not hobbies:
-        return "не указаны"
-    return ", ".join(str(hobby).strip() for hobby in hobbies if str(hobby).strip()) or "не указаны"
-
-
-def _shorten(text: str, limit: int = 60) -> str:
-    clean = " ".join((text or "").split())
-    if len(clean) <= limit:
+def shorten(text: str, width: int) -> str:
+    clean = " ".join((text or "").replace("\n", " ").split())
+    if len(clean) <= width:
         return clean
-    return clean[: limit - 1].rstrip() + "…"
+    if width <= 1:
+        return clean[:width]
+    return clean[: width - 1].rstrip() + "…"
+
+
+def format_hobbies(hobbies: Iterable[str]) -> str:
+    values = [item.strip() for item in hobbies if item and item.strip()]
+    return ", ".join(values) if values else "не указаны"
 
 
 def format_task_card(task: dict[str, Any], index: int | None = None) -> str:
     title = escape(task.get("title") or "Без названия")
-    title = _shorten(title, 70)
+    title = shorten(title, 70)
 
     priority = int(task.get("priority", 2) or 2)
     status = str(task.get("status", "pending") or "pending")
@@ -71,13 +73,13 @@ def format_plan(tasks: list[dict[str, Any]]) -> str:
         return (
             "🗓 <b>План на день</b>\n\n"
             "У тебя пока нет задач.\n"
-            "Добавь первую задачу через кнопку ниже."
+            "Нажми «➕ Добавить задачу», и я соберу тебе план."
         )
 
     lines = ["🗓 <b>План на день</b>", ""]
 
-    for i, task in enumerate(tasks, start=1):
-        lines.append(format_task_card(task, i))
+    for idx, task in enumerate(tasks, start=1):
+        lines.append(format_task_card(task, idx))
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -93,15 +95,15 @@ def format_tasks_table(tasks: list[dict[str, Any]]) -> str:
 
 def progress_summary(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
-        return "📊 <b>Прогресс дня</b>\n\nПока задач нет."
+        return "📊 <b>Прогресс дня</b>\n\nПлан на день пока пустой."
 
     counter = Counter(task.get("status", "pending") for task in tasks)
     total = len(tasks)
     done = counter.get("done", 0)
     pending = counter.get("pending", 0)
     skipped = counter.get("skipped", 0)
+    percent = round((done / total) * 100) if total else 0
 
-    percent = round(done / total * 100) if total else 0
     filled = min(10, round(percent / 10))
     bar = "█" * filled + "░" * (10 - filled)
 
@@ -109,7 +111,68 @@ def progress_summary(tasks: list[dict[str, Any]]) -> str:
         "📊 <b>Прогресс дня</b>\n\n"
         f"<b>{bar}</b> {percent}%\n\n"
         f"✅ Выполнено: <b>{done}</b>\n"
-        f"⏳ Осталось: <b>{pending}</b>\n"
-        f"⏭️ Пропущено: <b>{skipped}</b>\n"
+        f"⏳ В процессе: <b>{pending}</b>\n"
+        f"⏭️ Отложено: <b>{skipped}</b>\n"
         f"📝 Всего задач: <b>{total}</b>"
     )
+
+
+def format_task_details(task: dict[str, Any]) -> str:
+    duration = task.get("duration_minutes")
+    duration_text = f"{duration} мин" if duration else "не указано"
+    note = escape(task.get("note") or "—")
+    title = escape(task.get("title") or "Без названия")
+    status = STATUS_LABELS.get(task.get("status", "pending"), "в процессе")
+    priority = PRIORITY_LABELS.get(task.get("priority", 2), "средняя")
+
+    return (
+        f"<b>{title}</b>\n"
+        f"Серьёзность: <b>{priority}</b>\n"
+        f"Длительность: <b>{duration_text}</b>\n"
+        f"Статус: <b>{status}</b>\n"
+        f"Комментарий: {note}"
+    )
+
+
+def format_calorie_estimate(estimate: dict[str, Any]) -> str:
+    meal_name = escape(str(estimate.get("meal_name") or "Блюдо"))
+    calories = int(round(float(estimate.get("calories") or 0)))
+    protein = round(float(estimate.get("protein_grams") or 0), 1)
+    fat = round(float(estimate.get("fat_grams") or 0), 1)
+    carbs = round(float(estimate.get("carbs_grams") or 0), 1)
+    note = escape(str(estimate.get("note") or "Это примерная оценка по фото."))
+
+    return (
+        "🍽 <b>Оценка блюда</b>\n\n"
+        f"🍴 <b>{meal_name}</b>\n"
+        f"🔥 Калории: <b>{calories} ккал</b>\n"
+        f"🥩 Белки: <b>{protein} г</b>\n"
+        f"🧈 Жиры: <b>{fat} г</b>\n"
+        f"🍞 Углеводы: <b>{carbs} г</b>\n\n"
+        f"ℹ️ {note}\n\n"
+        "Если всё ок — добавь в дневник."
+    )
+
+
+def format_calorie_day(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return (
+            "🔥 <b>Калории за сегодня</b>\n\n"
+            "Пока записей нет.\n"
+            "Нажми «📷 Блюдо по фото» и пришли первое блюдо."
+        )
+
+    total = sum(int(item.get("calories") or 0) for item in entries)
+
+    lines = ["🔥 <b>Калории за сегодня</b>", ""]
+    for idx, item in enumerate(entries, start=1):
+        meal_name = escape(str(item.get("meal_name") or "Блюдо"))
+        calories = int(item.get("calories") or 0)
+        created_at = str(item.get("created_at") or "")
+        hhmm = created_at[11:16] if len(created_at) >= 16 else "--:--"
+        lines.append(f"{idx}. <b>{meal_name}</b> — {calories} ккал <i>({hhmm})</i>")
+
+    lines.append("")
+    lines.append(f"🔥 <b>Итого за день: {total} ккал</b>")
+
+    return "\n".join(lines)
