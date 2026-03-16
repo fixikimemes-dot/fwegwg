@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from collections import Counter
 from typing import Any
 
 try:
     from openai import AsyncOpenAI
-except Exception:
-    AsyncOpenAI = None
+except Exception:  # pragma: no cover
+    AsyncOpenAI = None  # type: ignore[assignment]
 
 from .formatters import PRIORITY_LABELS, format_hobbies
 
@@ -19,10 +20,6 @@ class AIService:
         self.enabled = bool(api_key and AsyncOpenAI is not None)
         self.client = AsyncOpenAI(api_key=api_key) if self.enabled else None
 
-    # =========================
-    # АНАЛИЗ ДНЯ
-    # =========================
-
     async def daily_analysis(
         self,
         user: dict[str, Any],
@@ -30,37 +27,29 @@ class AIService:
         today_checkins: list[dict[str, Any]],
         recent_history: dict[str, list[dict[str, Any]]],
     ) -> str:
-
         if not self.enabled or not self.client:
             return self._fallback_analysis(user, today_tasks, today_checkins, recent_history)
 
-        prompt = self._build_daily_analysis_prompt(
-            user,
-            today_tasks,
-            today_checkins,
-            recent_history,
-        )
+        prompt = self._build_daily_analysis_prompt(user, today_tasks, today_checkins, recent_history)
 
-        response = await self.client.responses.create(
-            model=self.model,
-            instructions=(
-                "Ты личный AI-коуч продуктивности. "
-                "Отвечай по-русски. "
-                "Формат ответа:\n"
-                "1) главный фокус дня\n"
-                "2) риски\n"
-                "3) что изменить\n"
-                "4) короткая мотивация"
-            ),
-            input=prompt,
-            max_output_tokens=500,
-        )
-
-        return response.output_text.strip()
-
-    # =========================
-    # AI КОУЧ
-    # =========================
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    "Ты личный учебный и продуктивный коуч в Telegram. "
+                    "Отвечай на русском. Пиши практично, не занудно. "
+                    "Анализируй пользователя как живого человека: учитывай его биографию, увлечения, "
+                    "прошлые срывы и текущую нагрузку. "
+                    "Формат ответа: 1) главный фокус дня, 2) риски, 3) что изменить в плане, "
+                    "4) короткое мотивирующее сообщение. Без длинных вступлений."
+                ),
+                input=prompt,
+                max_output_tokens=500,
+            )
+            text = (response.output_text or "").strip()
+            return text or self._fallback_analysis(user, today_tasks, today_checkins, recent_history)
+        except Exception:
+            return self._fallback_analysis(user, today_tasks, today_checkins, recent_history)
 
     async def coach_reply(
         self,
@@ -69,141 +58,250 @@ class AIService:
         recent_history: dict[str, list[dict[str, Any]]],
         question: str,
     ) -> str:
-
         if not self.enabled or not self.client:
             return self._fallback_coach_reply(user, today_tasks, recent_history, question)
 
         prompt = self._build_coach_prompt(user, today_tasks, recent_history, question)
 
-        response = await self.client.responses.create(
-            model=self.model,
-            instructions="Ты AI-наставник по продуктивности. Дай краткий разбор и план действий.",
-            input=prompt,
-            max_output_tokens=500,
-        )
-
-        return response.output_text.strip()
-
-    # =========================
-    # АНАЛИЗ ЕДЫ ПО ФОТО
-    # =========================
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    "Ты личный AI-наставник для школьника/студента и работающего человека. "
+                    "Отвечай на русском. Ответ должен быть конкретным: короткий разбор, затем план на 3-5 шагов. "
+                    "Не морализируй. Делай советы реалистичными."
+                ),
+                input=prompt,
+                max_output_tokens=500,
+            )
+            text = (response.output_text or "").strip()
+            return text or self._fallback_coach_reply(user, today_tasks, recent_history, question)
+        except Exception:
+            return self._fallback_coach_reply(user, today_tasks, recent_history, question)
 
     async def estimate_meal_from_photo(
         self,
         image_bytes: bytes,
         caption: str | None = None,
     ) -> dict[str, Any] | None:
-
         if not self.enabled or not self.client:
             return None
 
-        base64_image = base64.b64encode(image_bytes).decode()
-
-        prompt = (
-            "Определи блюдо на фото и оцени примерную калорийность.\n"
-            "Верни JSON в формате:\n"
-            "{\n"
-            ' "meal_name": "...",\n'
-            ' "calories": 500,\n'
-            ' "protein_grams": 25,\n'
-            ' "fat_grams": 20,\n'
-            ' "carbs_grams": 60,\n'
-            ' "note": "примерная оценка"\n'
-            "}\n"
-        )
-
-        if caption:
-            prompt += f"\nПодпись пользователя: {caption}"
-
-        response = await self.client.responses.create(
-            model=self.model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{base64_image}",
-                        },
-                    ],
-                }
-            ],
-            max_output_tokens=300,
-        )
-
-        text = response.output_text.strip()
-
         try:
-            return json.loads(text)
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+            prompt = (
+                "Определи блюдо на фото и оцени примерную калорийность. "
+                "Верни только JSON без пояснений и без markdown. "
+                "Формат строго такой:\n"
+                "{\n"
+                '  "meal_name": "Название блюда",\n'
+                '  "calories": 500,\n'
+                '  "protein_grams": 25,\n'
+                '  "fat_grams": 20,\n'
+                '  "carbs_grams": 60,\n'
+                '  "note": "Короткий комментарий"\n'
+                "}\n"
+                "Если точность низкая, всё равно дай приблизительную оценку."
+            )
+
+            if caption and caption.strip():
+                prompt += f"\nПодсказка пользователя: {caption.strip()}"
+
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты анализируешь фото еды и приблизительно считаешь калории. "
+                            "Отвечай только JSON-объектом."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    },
+                ],
+                max_tokens=300,
+            )
+
+            content = (response.choices[0].message.content or "").strip()
+            data = self._extract_json_object(content)
+            if not data:
+                return None
+
+            return {
+                "meal_name": str(data.get("meal_name") or "Блюдо"),
+                "calories": int(round(float(data.get("calories") or 0))),
+                "protein_grams": round(float(data.get("protein_grams") or 0), 1),
+                "fat_grams": round(float(data.get("fat_grams") or 0), 1),
+                "carbs_grams": round(float(data.get("carbs_grams") or 0), 1),
+                "note": str(data.get("note") or "Это приблизительная оценка по фото."),
+            }
         except Exception:
             return None
 
-    # =========================
-    # PROMPTS
-    # =========================
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        if not text:
+            return None
 
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
     def _build_daily_analysis_prompt(
-        self,
-        user,
-        today_tasks,
-        today_checkins,
-        recent_history,
+        user: dict[str, Any],
+        today_tasks: list[dict[str, Any]],
+        today_checkins: list[dict[str, Any]],
+        recent_history: dict[str, list[dict[str, Any]]],
     ) -> str:
-
         profile = (
-            f"Имя: {user.get('full_name')}\n"
-            f"Биография: {user.get('bio')}\n"
+            f"Имя: {user.get('full_name') or 'не указано'}\n"
+            f"Биография: {user.get('bio') or 'не указана'}\n"
             f"Увлечения: {format_hobbies(user.get('hobbies', []))}\n"
+            f"Часовой пояс: {user.get('timezone')}\n"
         )
 
-        tasks = "\n".join(
-            f"- {t['title']} ({PRIORITY_LABELS.get(t.get('priority',2))})"
-            for t in today_tasks
-        )
+        tasks_text = "\n".join(
+            f"- {task['title']} | приоритет {PRIORITY_LABELS.get(task.get('priority', 2), 'средняя')} | "
+            f"статус {task.get('status')} | длительность {task.get('duration_minutes') or 'не указана'}"
+            for task in today_tasks
+        ) or "- задач пока нет"
 
-        return f"{profile}\nЗадачи:\n{tasks}"
+        checkins_text = "\n".join(
+            f"- {checkin['kind']}: {checkin['summary']}" for checkin in today_checkins
+        ) or "- чек-инов нет"
 
-    def _build_coach_prompt(self, user, today_tasks, history, question):
-
-        tasks = "\n".join(
-            f"- {t['title']} ({t.get('status')})"
-            for t in today_tasks
+        last_tasks = recent_history.get("tasks", [])
+        counter = Counter(task.get("status", "pending") for task in last_tasks)
+        recent_summary = (
+            f"За последние дни задач: {len(last_tasks)}\n"
+            f"Выполнено: {counter.get('done', 0)}\n"
+            f"Отложено: {counter.get('skipped', 0)}\n"
+            f"Незавершено: {counter.get('pending', 0)}"
         )
 
         return (
-            f"Пользователь: {user.get('full_name')}\n"
-            f"Увлечения: {format_hobbies(user.get('hobbies', []))}\n"
-            f"Задачи:\n{tasks}\n\n"
-            f"Вопрос: {question}"
+            "Профиль пользователя:\n"
+            f"{profile}\n"
+            "Сегодняшние задачи:\n"
+            f"{tasks_text}\n\n"
+            "Сегодняшние заметки пользователя:\n"
+            f"{checkins_text}\n\n"
+            "История продуктивности:\n"
+            f"{recent_summary}\n\n"
+            "Сделай анализ так, будто ты знаешь пользователя лично и видишь его сильные стороны и паттерны срыва."
         )
 
-    # =========================
-    # FALLBACK
-    # =========================
+    @staticmethod
+    def _build_coach_prompt(
+        user: dict[str, Any],
+        today_tasks: list[dict[str, Any]],
+        recent_history: dict[str, list[dict[str, Any]]],
+        question: str,
+    ) -> str:
+        tasks_text = "\n".join(
+            f"- {task['title']} ({task.get('status')}, приоритет {task.get('priority')})"
+            for task in today_tasks
+        ) or "- задач на сегодня нет"
 
-    def _fallback_analysis(self, user, today_tasks, today_checkins, history):
-
-        pending = [t for t in today_tasks if t.get("status") == "pending"]
-        done = [t for t in today_tasks if t.get("status") == "done"]
-
-        focus = pending[0]["title"] if pending else "завершить день"
+        last_tasks = recent_history.get("tasks", [])[-10:]
+        history_text = "\n".join(
+            f"- {task['day']}: {task['title']} -> {task['status']}" for task in last_tasks
+        ) or "- история пустая"
 
         return (
-            f"1) Фокус: <b>{focus}</b>\n"
-            f"2) Риск: перегруз\n"
-            f"3) Сделай 1 главную задачу\n"
-            f"4) Уже выполнено {len(done)} задач"
+            f"Пользователь: {user.get('full_name') or 'не указано'}\n"
+            f"Биография: {user.get('bio') or 'не указана'}\n"
+            f"Увлечения: {format_hobbies(user.get('hobbies', []))}\n\n"
+            f"План на сегодня:\n{tasks_text}\n\n"
+            f"Недавняя история:\n{history_text}\n\n"
+            f"Вопрос пользователя: {question.strip()}"
         )
 
-    def _fallback_coach_reply(self, user, today_tasks, history, question):
+    @staticmethod
+    def _fallback_analysis(
+        user: dict[str, Any],
+        today_tasks: list[dict[str, Any]],
+        today_checkins: list[dict[str, Any]],
+        recent_history: dict[str, list[dict[str, Any]]],
+    ) -> str:
+        hobbies = format_hobbies(user.get("hobbies", []))
+        pending = [task for task in today_tasks if task.get("status") == "pending"]
+        done = [task for task in today_tasks if task.get("status") == "done"]
+        high_priority = [task for task in pending if task.get("priority") == 3]
+        last_tasks = recent_history.get("tasks", [])
+        counter = Counter(task.get("status", "pending") for task in last_tasks)
+        total = max(len(last_tasks), 1)
+        completion_rate = round(counter.get("done", 0) / total * 100)
+        latest_checkin = today_checkins[-1]["summary"] if today_checkins else "ты ещё не писал промежуточный отчёт"
 
-        pending = [t["title"] for t in today_tasks if t.get("status") == "pending"]
+        focus = (
+            high_priority[0]["title"]
+            if high_priority
+            else (pending[0]["title"] if pending else "закрыть день и подвести итог")
+        )
+        risk = (
+            "план перегружен"
+            if len(pending) >= 5
+            else "есть риск потерять темп после первой сложной задачи"
+            if pending
+            else "риск скорее в том, что ты недооценишь уже сделанный объём"
+        )
+        tweak = (
+            "разбей первую сложную задачу на 2 коротких спринта по 25 минут"
+            if high_priority
+            else "выбери 1 главную задачу и не распыляйся"
+        )
 
         return (
-            f"Разбор: {question}\n\n"
-            "План:\n"
-            "1) выбери одну задачу\n"
-            "2) 30 минут фокуса\n"
-            "3) напиши результат"
+            f"1) Главный фокус дня: <b>{focus}</b>.\n"
+            f"2) Риск: <b>{risk}</b>.\n"
+            f"3) Что изменить: {tweak}. Учитывая твои увлечения ({hobbies}), полезно добавить награду после ключевого блока работы.\n"
+            f"4) По истории у тебя примерно <b>{completion_rate}%</b> завершения задач. Последняя заметка: “{latest_checkin}”.\n"
+            f"Мотивация: ты уже закрыл <b>{len(done)}</b> задач сегодня — держи ритм, но не делай план красивее, чем он реалистичен."
+        )
+
+    @staticmethod
+    def _fallback_coach_reply(
+        user: dict[str, Any],
+        today_tasks: list[dict[str, Any]],
+        recent_history: dict[str, list[dict[str, Any]]],
+        question: str,
+    ) -> str:
+        pending = [task["title"] for task in today_tasks if task.get("status") == "pending"]
+        hobbies = format_hobbies(user.get("hobbies", []))
+
+        return (
+            f"Разбор: ты спросил про “{question.strip()}”. Сейчас у тебя в фокусе: "
+            f"{', '.join(pending[:3]) if pending else 'нет активных задач в плане'}.\n\n"
+            "План на 3 шага:\n"
+            "1) Выбери один ближайший результат на ближайшие 30-40 минут.\n"
+            "2) Убери всё лишнее и включи таймер.\n"
+            "3) После блока напиши мне короткий отчёт — что сделал и где застрял.\n\n"
+            f"Подстройка под тебя: используй свои интересы ({hobbies}) как награду после завершения важного куска работы."
         )
